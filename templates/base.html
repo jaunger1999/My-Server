@@ -1,15 +1,45 @@
 <!DOCTYPE html>
 <html lang="en">
-	<head>
-		<title>{{ post_title }}</title>
-		<!-- we'll use Tower middlewar middleware to serve this static content soon-->
-		<link href="/assets/post.css rel="stylesheet" type="text/css">
-	</head>
-
-	<body>
-		<div id="Post">
-		{% block post %}
-		{% endblock post %}
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta http-equiv="X-UA-Compatible" content="ie=edge">
+	<title>Jaunger's | {{ title }}</title>
+	<link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+	<header>
+		<div class="logo">
+			<h1>Jaunger's</h1>
+			<p>I like making and playing games.</p>
 		</div>
-	</body>
+		<nav>
+			<ul>
+				<li><a href="#about">About</a></li>
+				<li><a href="#projects">Projects</a></li>
+				<li><a href="#blog">Blog</a></li>
+				<li><a href="#contact">Contact</a></li>
+			</ul>
+   	</nav>
+	</header>
+
+	<main>
+		{% block content %}
+		{% endblock content %}
+	</main>
+
+	<footer>
+		<div>
+			<p>Socials:</p>
+			<a href="mailto:jaunger@proton.me">✉ Email</a>
+			<br>
+			<a href="https://www.youtube.com/@MrMagic159">▶ YouTube</a>
+		</div>
+		<div></div>
+		<div></div>
+		
+	</footer>
+
+	<script src="script.js"></script>
+</body>
 </html>

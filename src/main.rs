@@ -1,6 +1,5 @@
 use axum::{
     extract::{Form, Path, Request, State},
-    handler::HandlerWithoutStateExt,
     http::StatusCode,
     response::{Html, IntoResponse},
     routing::get,
@@ -17,16 +16,43 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use askama::Template;
 use sqlx::{
-    sqlite::{SqlitePool, SqlitePoolOptions},
+    sqlite::SqlitePool,
     types::time::Date,
 };
 use std::{env, sync::Arc};
+
+// Our custom Askama filter to replace spaces with dashes in the title
+mod filters {
+
+    // now in our templates with can add tis filter e.g. {{ post_title|rmdash }}
+    pub fn rmdashes(title: &str) -> askama::Result<String> {
+        Ok(title.replace("-", " ").into())
+    }
+}
+
+// create an Axum template for our homepage
+// index_title is the html page's title
+// index_links are the titles of the blog posts
+#[derive(Template)]
+#[template(path = "index.html")]
+pub struct IndexTemplate<'a> {
+    pub title: &'a str,
+    pub index_links: &'a Vec<String>,
+}
+
+#[derive(Deserialize, Debug)]
+#[allow(dead_code)]
+struct Input {
+    name: String,
+    email: String,
+}
 
 // Each post template will be populated with the values
 // located in the shared state of the handlers.
 #[derive(Template)]
 #[template(path = "posts.html")]
 pub struct PostTemplate<'a> {
+    pub title: &'a str,
     pub post_title: &'a str,
     pub post_date: String,
     pub post_body: &'a str,
@@ -48,9 +74,10 @@ async fn main() -> Result<(), sqlx::Error> {
     let pool = SqlitePool::connect(url.as_str()).await?;
     let blog: Vec<BlogPost> = sqlx::query_as!(BlogPost, "SELECT * FROM blog")
         .fetch_all(&pool)
-        .await?;
-
-    println!("{}", blog[0].content);
+        .await
+        .unwrap();
+    println!("{} {}", blog[0].title, blog[0].content);
+    let shared_state = Arc::new(blog);
 
     tracing_subscriber::registry()
         .with(
@@ -62,94 +89,29 @@ async fn main() -> Result<(), sqlx::Error> {
         .init();
 
     tokio::join!(
-        serve(using_serve_dir(), 3001),
-        serve(using_serve_dir_with_assets_fallback(), 3002),
-        serve(using_serve_dir_only_from_root_via_fallback(), 3003),
-        serve(using_serve_dir_with_handler_as_service(), 3004),
-        serve(two_serve_dirs(), 3005),
-        serve(calling_serve_dir_from_a_handler(), 3006),
-        serve(using_serve_file_from_a_route(), 3307),
+        serve(calling_serve_dir_from_a_handler(shared_state), 4000),
     );
 
     Ok(())
 }
 
-async fn handler() -> impl IntoResponse {
-    match fs::read_to_string("assets/tetris.html") {
-        Ok(content) => Html(content),
-        Err(e) => Html(format!("Error : {}", e)),
-    }
-}
-
-fn using_serve_dir() -> Router {
-    // serve the file in the "assets" directory under `/home`
-    Router::new().nest_service("/home", ServeDir::new("assets"))
-}
-
-fn using_serve_dir_with_assets_fallback() -> Router {
-    // `ServeDir` allows setting a fallback if an asset is not found
-    // so with this `GET /assets/doesnt-exist.jpg` will return `index.html`
-    // rather than a 404
-    let serve_dir = ServeDir::new("assets").not_found_service(ServeFile::new("assets/index.html"));
-
-    Router::new()
-        .route("/foo", get(|| async { "Hi from /foo" }))
-        .nest_service("/assets", serve_dir.clone())
-        .fallback_service(serve_dir)
-}
-
-fn using_serve_dir_only_from_root_via_fallback() -> Router {
-    // you can also serve the assets directly from the root (not nested under `/assets`)
-    // by only setting a `ServeDir` as the fallback
-    let serve_dir = ServeDir::new("assets").not_found_service(ServeFile::new("assets/index.html"));
-
-    Router::new()
-        .route("/foo", get(|| async { "Hi from /foo" }))
-        .fallback_service(serve_dir)
-}
-
-fn using_serve_dir_with_handler_as_service() -> Router {
-    async fn handle_404() -> (StatusCode, &'static str) {
-        (StatusCode::NOT_FOUND, "Not found")
-    }
-
-    // you can convert handler function to service
-    let service = handle_404.into_service();
-
-    let serve_dir = ServeDir::new("assets").not_found_service(service);
-
-    Router::new()
-        .route("/foo", get(|| async { "Hi from /foo" }))
-        .fallback_service(serve_dir)
-}
-
-fn two_serve_dirs() -> Router {
-    // you can also have two `ServeDir`s nested at different paths
-    let serve_dir_from_assets = ServeDir::new("assets");
-    let serve_dir_from_dist = ServeDir::new("dist");
-
-    Router::new()
-        .nest_service("/assets", serve_dir_from_assets)
-        .nest_service("/dist", serve_dir_from_dist)
-}
-
 #[allow(clippy::let_and_return)]
-fn calling_serve_dir_from_a_handler() -> Router {
+fn calling_serve_dir_from_a_handler(shared_state: Arc<Vec<BlogPost>>) -> Router {
     // via `tower::Service::call`, or more conveniently `tower::ServiceExt::oneshot` you can
     // call `ServeDir` yourself from a handler
-    Router::new().nest_service(
-        "/home",
-        get(|request: Request| async {
-            let service = ServeDir::new("assets");
-            let result = service.oneshot(request).await;
-            result
-        })
-        .post(accept_form),
-    )
-}
-
-fn using_serve_file_from_a_route() -> Router {
-    Router::new().route_service("/foo", ServeFile::new("assets/tetris.html"))
+    Router::new()
+        .route("/", get(index))
+        .route("/post/{query_title}", get(post))
+        .with_state(shared_state)
+        .nest_service(
+            "/assets",
+            get(|request: Request| async {
+                let service = ServeDir::new("assets");
+                let result = service.oneshot(request).await;
+                result
+            })
+            .post(accept_form),
+        )
 }
 
 async fn serve(app: Router, port: u16) {
@@ -159,13 +121,6 @@ async fn serve(app: Router, port: u16) {
     axum::serve(listener, app.layer(TraceLayer::new_for_http()))
         .await
         .unwrap();
-}
-
-#[derive(Deserialize, Debug)]
-#[allow(dead_code)]
-struct Input {
-    name: String,
-    email: String,
 }
 
 async fn accept_form(Form(input): Form<Input>) {
@@ -178,8 +133,10 @@ async fn post(
     Path(query_title): Path<String>,
     State(state): State<Arc<Vec<BlogPost>>>,
 ) -> impl IntoResponse {
+    tracing::debug!("HI");
     // A default template or else the compiler complains
     let mut template = PostTemplate {
+        title: "none",
         post_title: "none",
         post_date: "none".to_string(),
         post_body: "none",
@@ -191,18 +148,17 @@ async fn post(
             // We found one so mutate the template variable and
             // populate it with the post that the user requested
             template = PostTemplate {
+                title: "Blog", 
                 post_title: &state[i].title,
                 post_date: state[i].date_published.to_string(),
                 post_body: &state[i].content,
             };
             break;
-        } else {
-            continue;
         }
     }
 
     // 404 if no title found matching the user's query
-    if &template.post_title == &"none" {
+    if &template.title == &"none" {
         return (StatusCode::NOT_FOUND, "404 not found").into_response();
     }
 
@@ -213,33 +169,25 @@ async fn post(
     }
 }
 
-// create an Axum template for our homepage
-// index_title is the html page's title 
-// index_links are the titles of the blog posts 
-#[derive(Template)]
-#[template(path = "index.html")]
-pub struct IndexTemplate<'a> {
-    pub index_title: String,
-    pub index_links: &'a Vec<String>,
-}
-
 // Then populate the template with all post titles
-async fn index(State(state): State<Arc<Vec<BlogPost>>>) -> impl IntoResponse{
-
-    let s = state.clone();
+async fn index(State(state): State<Arc<Vec<BlogPost>>>) -> impl IntoResponse {
     let mut plinks: Vec<String> = Vec::new();
 
-    for i in 0 .. s.len() {
-        plinks.push(s[i].title.clone());
+    for i in 0..state.len() {
+        plinks.push(state[i].title.clone());
     }
 
-    let template = IndexTemplate{index_title: String::from("My blog"), index_links: &plinks};
+    let template = IndexTemplate {
+        title: "Home",
+        index_links: &plinks,
+    };
 
     match template.render() {
-            Ok(html) => Html(html).into_response(),
-         Err(err) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to render template. Error {}", err),
-            ).into_response(),
+        Ok(html) => Html(html).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to render template. Error {}", err),
+        )
+            .into_response(),
     }
 }
